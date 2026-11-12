@@ -29,7 +29,7 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 ********************************************************************************/
 
 
-#include <urdf/model.hpp>
+#include <urdf/model.h>
 #include <tf2_kdl/tf2_kdl.hpp>
 #include <algorithm>
 #include <kdl/tree.hpp>

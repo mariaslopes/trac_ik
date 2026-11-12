@@ -4,7 +4,6 @@
 # Convenience code to wrap TRAC IK
 
 from trac_ik_python.trac_ik_wrap import TRAC_IK
-import rospy
 
 
 class IK(object):
@@ -20,11 +19,11 @@ class IK(object):
         :param float epsilon: Error epsilon.
         :param solve_type str: Type of solver, can be:
             Speed (default), Distance, Manipulation1, Manipulation2
-        :param urdf_string str: Optional arg, if not given URDF is taken from
-            the param server at /robot_description.
+        :param urdf_string str: The robot URDF as an XML string (ROS 2 has no
+            global parameter server to read /robot_description from).
         """
         if urdf_string is None:
-            urdf_string = rospy.get_param('/robot_description')
+            raise ValueError("urdf_string is required")
         self._urdf_string = urdf_string
         self._timeout = timeout
         self._epsilon = epsilon

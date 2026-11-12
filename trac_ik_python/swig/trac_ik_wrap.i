@@ -7,11 +7,19 @@
  /* Includes the header in the wrapper code */
  #include <trac_ik/trac_ik.hpp>
  #include <urdf/model.h>
- #include <ros/ros.h>
+ #include <urdf_parser/urdf_parser.h>
+ #include <rclcpp/rclcpp.hpp>
  #include <kdl_parser/kdl_parser.hpp>
  #include <limits>
- #include <tf_conversions/tf_kdl.h>
+ #include <stdexcept>
  %}
+
+ // C++ exceptions (bad URDF, missing chain) become Python RuntimeError
+ %include <exception.i>
+ %exception {
+   try { $action }
+   catch (const std::exception& e) { SWIG_exception(SWIG_RuntimeError, e.what()); }
+ }
 
  // We need this or we will get on runtime
  // NotImplementedError: Wrong number or type of arguments for overloaded function
@@ -32,8 +40,12 @@ namespace std {
 
 // Ignore original constructors as they are not useful in Python
 // Note the full namespacing
-%ignore TRAC_IK::TRAC_IK::TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime=0.005, double _eps=1e-5, SolveType _type=Speed);
-%ignore TRAC_IK::TRAC_IK::TRAC_IK(const std::string& base_link, const std::string& tip_link, const std::string& URDF_param="/robot_description", double _maxtime=0.005, double _eps=1e-5, SolveType _type=Speed);
+
+// The library constructors need an rclcpp Node / Logger and KDL types; the
+// %extend constructor below builds the chain from a URDF string instead.
+%ignore TRAC_IK::TRAC_IK::TRAC_IK(rclcpp::Node::SharedPtr, const KDL::Chain&, const KDL::JntArray&, const KDL::JntArray&, double, double, SolveType);
+%ignore TRAC_IK::TRAC_IK::TRAC_IK(rclcpp::Node::SharedPtr, const std::string&, const std::string&, const std::string&, double, double, SolveType);
+%ignore TRAC_IK::TRAC_IK::TRAC_IK(const KDL::Chain&, const KDL::JntArray&, const KDL::JntArray&, double, double, SolveType, const rclcpp::Logger&);
 
 // Ignore the runKDL and runNLOPT methods as they fail to be wrapped (and are private anyways)
 %ignore TRAC_IK::runKDL(const KDL::JntArray &q_init, const KDL::Frame &p_in);
@@ -59,23 +71,24 @@ namespace std {
     TRAC_IK(const std::string& base_link, const std::string& tip_link, const std::string& urdf_string,
       double timeout, double epsilon, const std::string& solve_type="Speed"){
 
-      urdf::Model robot_model;
-
-      robot_model.initString(urdf_string);
-
-      ROS_DEBUG_STREAM_NAMED("trac_ik","Reading joints and links from URDF");
+      // urdfdom directly: urdf::Model::initString goes through pluginlib,
+      // which needs the ament index (a sourced ROS environment)
+      urdf::ModelInterfaceSharedPtr robot_model = urdf::parseURDF(urdf_string);
+      if (!robot_model) {
+        throw std::runtime_error("Failed to parse the URDF string");
+      }
 
       KDL::Tree tree;
 
-      if (!kdl_parser::treeFromUrdfModel(robot_model, tree)) {
-        ROS_FATAL("Failed to extract kdl tree from xml robot description");
+      if (!kdl_parser::treeFromUrdfModel(*robot_model, tree)) {
+        throw std::runtime_error("Failed to extract kdl tree from xml robot description");
       }
 
 
       KDL::Chain chain;
 
       if(!tree.getChain(base_link, tip_link, chain)) {
-        ROS_FATAL("Couldn't find chain %s to %s",base_link.c_str(),tip_link.c_str());
+        throw std::runtime_error("Couldn't find chain " + base_link + " to " + tip_link);
       }
 
       uint num_joints_;
@@ -99,7 +112,7 @@ namespace std {
       for(unsigned int i = 0; i < chain_segs.size(); ++i) {
 
         link_names_.push_back(chain_segs[i].getName());
-        joint = robot_model.getJoint(chain_segs[i].getJoint().getName());
+        joint = robot_model->getJoint(chain_segs[i].getJoint().getName());
         if (joint->type != urdf::Joint::UNKNOWN && joint->type != urdf::Joint::FIXED) {
           joint_num++;
           assert(joint_num<=num_joints_);
@@ -127,7 +140,6 @@ namespace std {
             joint_min(joint_num-1)=std::numeric_limits<float>::lowest();
             joint_max(joint_num-1)=std::numeric_limits<float>::max();
           }
-          ROS_DEBUG_STREAM("IK Using joint "<<chain_segs[i].getName()<<" "<<joint_min(joint_num-1)<<" "<<joint_max(joint_num-1));
         }
       }
 
@@ -142,7 +154,7 @@ namespace std {
         solvetype = TRAC_IK::Distance;
       else {
           if (solve_type != "Speed") {
-              ROS_WARN_STREAM_NAMED("trac_ik", solve_type << " is not a valid solve_type; setting to default: Speed");
+              RCLCPP_WARN_STREAM(rclcpp::get_logger("trac_ik_python"), solve_type << " is not a valid solve_type; setting to default: Speed");
           }
           solvetype = TRAC_IK::Speed;
       }
@@ -166,17 +178,7 @@ namespace std {
      const double boundrx=0.0, const double boundry=0.0, const double boundrz=0.0)
     {
 
-      KDL::Frame frame;
-      geometry_msgs::Pose pose;
-      pose.position.x = x;
-      pose.position.y = y;
-      pose.position.z = z;
-      pose.orientation.x = rx;
-      pose.orientation.y = ry;
-      pose.orientation.z = rz;
-      pose.orientation.w = rw;
-
-      tf::poseMsgToKDL(pose, frame);
+      KDL::Frame frame(KDL::Rotation::Quaternion(rx, ry, rz, rw), KDL::Vector(x, y, z));
 
       KDL::JntArray in(q_init.size()), out(q_init.size());
 
@@ -221,12 +223,11 @@ namespace std {
       std::vector<std::string> link_names_;
       urdf::JointConstSharedPtr joint;
 
-      urdf::Model robot_model;
-      robot_model.initString(urdf_string);
+      urdf::ModelInterfaceSharedPtr robot_model = urdf::parseURDF(urdf_string);
 
       for(unsigned int i = 0; i < chain_segs.size(); ++i) {
         link_names_.push_back(chain_segs[i].getName());
-        joint = robot_model.getJoint(chain_segs[i].getJoint().getName());
+        joint = robot_model->getJoint(chain_segs[i].getJoint().getName());
         if (joint->type != urdf::Joint::UNKNOWN && joint->type != urdf::Joint::FIXED) {
           joint_names_.push_back(joint->name);
         }

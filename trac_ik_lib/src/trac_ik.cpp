@@ -34,7 +34,11 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rclcpp/rclcpp.hpp>
 #include <limits>
 #include <kdl_parser/kdl_parser.hpp>
-#include <urdf/model.hpp>
+#if __has_include(<urdf/model.h>)
+#include <urdf/model.h>
+#else
+#include <urdf/model.h>  // ROS 2 Jazzy and older
+#endif
 
 namespace TRAC_IK
 {
